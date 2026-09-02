@@ -12,10 +12,23 @@ Run all of it; a missing tool is `NOT-RUN` with a reason, never a silent skip.
 ```bash
 helm lint "$CHART"
 helm lint "$CHART" --strict -f "$CHART/values-cluster.yaml"
+helm lint "$CHART" --strict -f "$CHART/values-single.yaml"
 helm template t "$CHART" > render-default.yaml
 helm template t "$CHART" -f "$CHART/values-cluster.yaml" > render-cluster.yaml
 helm template t "$CHART" -f "$CHART/values-single.yaml"  > render-single.yaml
+helm template t "$CHART" --set hubble.enabled=true      > render-hubble.yaml
+for f in render-*.yaml; do printf '%-22s %s objects\n' "$f" "$(grep -c '^kind:' "$f")"; done
 ```
+
+Write each invocation out as above. Do not iterate presets with a shell
+variable that holds several flags (`for v in "" "-f values-cluster.yaml
+--strict"; do helm lint . $v`): the string expands as one argument, helm
+looks for a file named ` values-cluster.yaml --strict`, and the preset
+renders report 0 objects, which reads exactly like a chart regression. This
+has happened twice. A 0-object render, or a lint error naming a file with a
+leading space, is a harness fault: fix the invocation and re-run before any
+conclusion about the chart. Record the object counts (current branches:
+15 default, 15 cluster, 13 single, 18 with Hubble) so a drift is visible.
 
 **validateValues fail-paths** — the chart guards invalid configs with
 `fail`; each of these MUST exit non-zero, and a pass is itself a bug:
@@ -36,8 +49,9 @@ findings: root-by-default containers, liveness==readiness endpoints on
 pd/store/server, no NetworkPolicy (explicitly unsupported), ephemeral-storage
 unset — report them, they gate restricted-PSS namespaces.
 
-**helm-unittest**: the chart may ship no `tests/`; write a suite in a COPY of
-the chart (never modify the chart under test). High-value assertions: peer
+**helm-unittest**: current branches ship `tests/` (ten suites); run
+`helm unittest "$CHART"` and record the count. Older charts ship none; then
+write a suite in a COPY of the chart (never modify the chart under test). High-value assertions: peer
 lists are DNS-based and track `pd.replicas`; `serviceName` equals the
 headless Service name; wait-container quorum math (`REQUIRED=` 1/2/3 at
 replicas 1/3/5); PDB gating off at 1 replica; derived
@@ -57,13 +71,36 @@ in rendered config; image tags and pull policies vs what you actually loaded.
 
 ## Install + smoke
 
-Kind cluster: 1 control-plane + 3 workers for the full topology.
-`kind load docker-image` every component image first — **the load aborts
-entirely if any one image is missing locally** (`docker pull` them first),
-and check its exit status; a failed load means slow in-node pulls and
-possibly `Always`-policy surprises. (Non-Kind distros: use the distro's
-import — `minikube image load`, `k3s ctr images import` — or a registry the
-cluster can reach.)
+Kind cluster: 1 control-plane + 3 workers for the full topology (the
+cluster preset's `required` anti-affinity needs three schedulable nodes).
+Install `kind` from the GitHub releases/latest asset; the
+`kind.sigs.k8s.io/dl/latest` redirect has served alpha builds. Preload every
+component image, then check the nodes actually hold them:
+
+```bash
+docker pull hugegraph/pd:latest   # and store, server, hubble
+# Docker 29 with the containerd image store: `kind load docker-image` fails
+# with "ctr: content digest sha256:...: not found" on multi-platform
+# manifests. Export one platform and load the archive instead.
+for i in pd store server hubble; do
+  docker save --platform linux/amd64 -o "/tmp/$i.tar" "hugegraph/$i:latest" \
+    && kind load image-archive "/tmp/$i.tar" --name "$CLUSTER" && rm -f "/tmp/$i.tar"
+done
+for n in $(kind get nodes --name "$CLUSTER"); do
+  echo "$n: $(docker exec "$n" crictl images 2>/dev/null | grep -c hugegraph) hugegraph images"
+done
+```
+
+`kind load docker-image` **aborts entirely if any one image is missing
+locally**, so pull first and check every load's exit status; a failed load
+means slow in-node pulls and possibly `Always`-policy surprises. Set
+`pullPolicy: IfNotPresent` on all four images in the session values so the
+preloaded copies are used. (Non-Kind distros: use the distro's import —
+`minikube image load`, `k3s ctr images import` — or a registry the cluster
+can reach.) Record the images' `org.opencontainers.image.revision` labels
+(`docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`);
+Hubble carries none on current builds, note that rather than leaving the
+cell blank.
 
 **session-values.yaml** (mode 600, in the session dir — it carries a
 credential) must at minimum pin the admin credentials, because the chart's
@@ -125,6 +162,81 @@ packet counters — no evidence, no verdict beyond INCONCLUSIVE.
 | PVC reattach | graceful delete a store pod | `.spec.volumeName` unchanged; pre-fault data readable | local-path PVs are node-pinned on Kind |
 | Rolling restart under load | `kubectl rollout restart` store→pd→server with a write sampler | zero LOST acked writes; bounded error window; PD roll causes a block window (bug family Face 2) | run the sampler in the SAME foreground session (see pitfalls) |
 | Auth matrix | none | on EVERY Server pod IP: protected read/write = 401 no-cred, 401 wrong-cred, 200/201 admin | `/versions` is PUBLIC — useless as an auth oracle |
+| Server discovery lease | `kubectl delete pod <server>` with a 5s poller on PD `/v1/allInfo` running | three `data.other` rows = three Server Pod IPs before; new IP within one heartbeat; old IP gone within 45s; never more than replicas+1 rows; Hubble `operations/nodes` lists three SERVER | measured 30 to 35s expiry, 5s new registration; see §Discovery lease |
+
+### Discovery lease (four claims)
+
+Added when the chart switched Servers from announcing the shared Service
+URL to announcing their own Pod IP. Read the registry through a port-forward
+to the PD Service; every read carries `-u hg:` (PD REST checks the service
+name only, see §Endpoints).
+
+```bash
+kubectl -n "$NS" port-forward svc/"$REL"-hugegraph-pd 18620:8620 > pf-pd.log 2>&1 < /dev/null &
+curl -s -u hg: -H 'Content-Type: application/json' http://127.0.0.1:18620/v1/allInfo \
+  | jq -r '.data.other[] | "\(.appName)\t\(.address)\t\(.interval)\t\(.labels.cores)"'
+```
+
+1. **Three rows.** `data.other` has one entry per Server replica and the
+   addresses equal `kubectl get pod -o wide` Pod IPs on port 8080; each row
+   carries `interval 15000` and its own labels. One row with the Service
+   name means the announcement env never reached the process (chart); one
+   row with a Pod IP means PD keys on something other than the address
+   (upstream, and the registry reading is wrong); zero rows is registration
+   itself (upstream).
+2. **Hubble shows three.** Log in and list nodes (recipe in §Journey);
+   three `SERVER` items with distinct uptimes. PD three, Hubble one means the
+   Server-side `getServiceUrls` label filter, not the chart.
+3. **Expiry within the lease.** Start the poller, delete one Server Pod at
+   `T`, record: first sample with the new IP, last sample with the old IP,
+   first sample without it, peak row count. Pass: old IP gone within 45s
+   (15s heartbeat x 3 misses), new IP within ~one heartbeat, peak = replicas
+   + 1. Old IP past 60s: the lease formula does not match the image
+   (upstream; correct the Limitations number). Never leaving: PD does not
+   expire entries (upstream, serious).
+
+   ```bash
+   # poll.sh <pd-host:port> <outfile>
+   PD=$1; OUT=$2
+   while :; do
+     NOW=$(date +%s)
+     BODY=$(curl -s -m 4 -u hg: -H 'Content-Type: application/json' "http://$PD/v1/allInfo")
+     ADDRS=$(printf '%s' "$BODY" | jq -r '[.. | objects | select(has("address")) | .address] | unique | join(" ")' 2>/dev/null)
+     echo "$NOW $ADDRS" | tee -a "$OUT"; sleep 5
+   done
+   ```
+
+4. **Override still collapses.** `helm upgrade --set-string
+   server.advertiseUrl=http://<svc>.<ns>.svc:8080`, wait one lease: exactly
+   one `data.other` row with that URL. This proves the outside-Hubble path.
+
+Run the poller from a script file on the host, never inline over ssh, and
+stop it by pid: a `pkill -f poll.sh` issued over ssh matches the ssh shell
+itself and kills your session.
+
+## Endpoints (read from the handlers, not guessed)
+
+PD REST classes live under `hugegraph-pd/hg-pd-service/.../pd/rest/`; the
+auth interceptor's exclusion list is in `AuthenticationConfigurer.java`.
+Everything under `/v1` that is not excluded takes Basic auth, and on current
+images the check is the **service name only** (`hg`, `store`, `hubble`,
+`vermeer`; any password, including empty); every outcome answers HTTP 200
+with the result in the body, so status codes carry no signal there.
+
+| Endpoint | Auth | What it is | Source |
+|---|---|---|---|
+| `GET /v1/health` | none | liveness: listener is up, never consults raft | `StoreAPI.checkHealthy` |
+| `GET /v1/ready` | none | readiness: 200 only with an active raft node and a leader, else 503; PD images from 1.8.0 (apache/hugegraph#3185) | `StoreAPI.checkReady` |
+| `GET /v1/members` | `-u hg:` | PD raft members, `pdLeader` with role and state | `MemberAPI` |
+| `GET /v1/stores` | `-u hg:` | registered Stores and state counts; lags the 60s patrol | `StoreAPI` |
+| `GET /v1/allInfo` | `-u hg:` | everything registered: `data.PD`, `data.STORE`, `data.other` (Servers) | `RegistryAPI.getAllInfo` |
+| `POST /v1/registryInfo` | `-u hg:` | registry query by `appName` / labels / version, JSON body | `RegistryAPI.getInfo` |
+| `/actuator/prometheus` | none | `hg_up`, `hg_stores`, `hg_terms`, `hg_graphs`; from 1.8.0 also `hg_raft_leader`, `hg_raft_has_leader`, `hg_raft_alive_peers` | `PDMetrics` |
+
+Server registrations are **not** in `/v1/members`; that endpoint lists PD's
+own raft group. The registry key is app name / version / address
+(`DiscoveryMetaStore.toKey`), which is why the announced address decides
+whether replicas collapse into one row.
 
 ## Upgrade path + rotation
 
@@ -164,3 +276,26 @@ fails as written is a finding (release-literal names, curl assumed in
 images, password echoed to terminal). Never run the journey while another
 full topology occupies the same host — resource starvation mimics chart
 bugs and voids the result.
+
+**Hubble through its API** (faster and stricter than driving the UI, and
+the only way to assert counts): the backend is `/api/v1.3`; the login body
+is the hugegraph-client `Login` shape, `user_name` and `user_password`, and
+the session is cookie based. Four wrong attempts lock the account for 5s
+(HTTP 429), so get the password from the chart's admin Secret first.
+`/actuator/mappings` returns the single-page frontend, not the route table;
+routes come from `hubble-be/.../controller/` in hugegraph-toolchain.
+
+```bash
+PW=$(kubectl -n "$NS" get secret "$REL"-admin -o jsonpath='{.data.password}' | base64 -d)
+kubectl -n "$NS" port-forward svc/"$REL"-hugegraph-hubble 18088:8088 > pf-hubble.log 2>&1 < /dev/null &
+curl -s -c hubble.cookies -H 'Content-Type: application/json' \
+  -d "{\"user_name\":\"admin\",\"user_password\":\"$PW\"}" http://127.0.0.1:18088/api/v1.3/auth/login
+curl -s -b hubble.cookies http://127.0.0.1:18088/api/v1.3/operations/capabilities
+curl -s -b hubble.cookies 'http://127.0.0.1:18088/api/v1.3/operations/nodes?page_size=100' \
+  | jq -r '.data.items[] | "\(.type)\t\(.status)\t\(.name)\t\(.metrics.system.basic.uptime // "-")"' | sort
+```
+
+Expected on the full topology: three `PD`, three `STORE`, three `SERVER`,
+all `UP`, Servers with distinct uptimes. `operations/overview` gives the
+per-source availability. The Server items carry no address, so the count
+and the uptimes are the evidence; the addresses come from PD `/v1/allInfo`.

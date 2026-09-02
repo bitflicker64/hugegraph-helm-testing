@@ -86,14 +86,20 @@ line is not rate-limited.
 
 ## Adjacent PD surface facts (bite during testing)
 
-- PD management REST (`/v1/members`, `/v1/stores`) rejects **every**
-  credential (`AccessDeniedException: invalid service name`) on current
-  images, and unauthenticated GETs return **HTTP 200** with body
-  `{"error":"Unauthorized!"}` — so membership oracles must come from PD
-  *logs* (`becomes leader`, block counts) and the data plane, not REST, and
-  status-code health checks are meaningless against PD REST.
-- `/v1/health` is the unauthenticated endpoint that works — quorum-counting
-  init containers use it.
+- PD management REST (`/v1/members`, `/v1/stores`, `/v1/allInfo`,
+  `/v1/task/*`) authenticates on the Basic-auth **service name only**: the
+  username must be one of `hg`, `store`, `hubble`, `vermeer` and the
+  password is never read (`Authentication.java`, commented-out TODO), so
+  `-u hg:` with an empty password works on current images. Every outcome —
+  success, `invalid service name`, missing header — returns **HTTP 200**
+  with the result in the body, so status-code checks are meaningless
+  against PD REST. (Earlier versions of this file said the endpoints reject
+  every credential; that was derived from reading the code and was wrong.
+  Measured 2026-09-02.)
+- `/v1/health` is unauthenticated and answers 200 as soon as the listener is
+  up; the Store's wait init counts those answers, which is a count of
+  listeners, not of quorum members. PD images from 1.8.0 add `/v1/ready`
+  (503 without a raft leader).
 - The upgrade roll of the PD StatefulSet (any pod-template change) triggers
   Face 2 transiently: expect a block window during and after the roll,
   degraded-but-serving, until the all-at-once remediation is applied.

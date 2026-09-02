@@ -17,6 +17,12 @@ too clean or too broken.
   locally.** It does not load the others. `docker pull` everything first and
   check the load's exit status; otherwise pods quietly pull from the network
   inside nodes (slow, and wrong under `imagePullPolicy: Never`).
+- **`kind load docker-image` fails outright under Docker 29's containerd
+  image store** (`ctr: content digest sha256:...: not found`): the export is
+  a multi-platform manifest kind's importer cannot resolve. Use
+  `docker save --platform linux/amd64` and `kind load image-archive`, then
+  count images on each node with `crictl images`. And install kind from the
+  GitHub releases/latest asset; the `dl/latest` redirect has served alphas.
 - **`kill -9 1` inside a container is inert** when PID 1 is an init shim
   (dumb-init): the kernel drops signals to PID 1 from its own namespace. To
   crash the app, kill the java child: `kill -9 $(pgrep -f "[j]ava" | head -1)`.
@@ -41,6 +47,12 @@ too clean or too broken.
   consecutive `helm template` runs differ. Pin credentials in test values;
   never diff or snapshot rendered Secret data; expect template-only (GitOps)
   renders to differ from live-cluster renders (lookup returns nothing).
+- **A shell variable holding several flags is one argument.** `for v in ""
+  "-f values-cluster.yaml --strict"; do helm lint . $v` makes helm look for
+  a file named ` values-cluster.yaml --strict`; the preset renders come back
+  with 0 objects and the lint error looks like a chart failure. Write every
+  preset invocation out, or use a `case` table. A 0-object render is a
+  harness fault until the invocation has been re-run by hand.
 - **`helm template --show-only templates/NOTES.txt` errors** ("could not
   find template") — NOTES.txt is not a manifest. Verify NOTES content at the
   source file, or via `helm install --dry-run` output.
@@ -92,11 +104,28 @@ too clean or too broken.
   landing evidence, not pod status.
 - **PD store-state oracles lag**: the offline patrol runs on a 60s cadence —
   polling `/v1/stores` sooner than ~70s after a store fault reads stale Up.
-- **A crippled PD passes `/v1/health`.** Readiness is not membership; the
-  only trustworthy membership signals on current images are PD logs
-  (`becomes leader`, block counts) and end-to-end writes.
+- **A crippled PD passes `/v1/health`.** It answers 200 as soon as the
+  listener is up; with two of three PDs deleted the survivor logged `Raft
+  lost leader` within a second and still answered 200 on 26 of 26 samples.
+  Membership signals on such images are PD logs (`becomes leader`, block
+  counts), `/v1/members` with `-u hg:`, and end-to-end writes. PD images
+  from 1.8.0 add `/v1/ready` (503 without a leader); the chart's
+  `pd.readinessPath` and `store.waitPath` switch to it.
+- **An oracle named from a URL is a guess.** `/v1/members` sounds like "who
+  is registered" and lists only PD raft members; Server registrations are
+  under `/v1/allInfo` (`data.other`). Read the REST class that serves an
+  endpoint before a claim block cites it, and record path, auth and response
+  shape next to the claim.
 
 ## Reporting
+
+- **Label every claim with its evidence class** (`measured`, `derived`,
+  `carried`) and never let a negative claim be anything but measured.
+  "PD REST rejects every credential" was derived from source, carried
+  through three reports, and used to declare a quorum gate impossible and to
+  ship recovery commands without a credential; five curls with the real
+  username set and an empty password disproved it. A derived number (a
+  lease, a timeout) stays labelled derived until a campaign measures it.
 
 - When the campaign report lives in a shared/concurrently-edited document,
   never blind-overwrite on a conflict: fetch the live version, prove your

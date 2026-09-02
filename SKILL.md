@@ -118,6 +118,19 @@ INCONCLUSIVE, never a PASS. Declare each scenario's oracle **before**
 injecting its fault — an oracle written afterwards gets fitted to whatever
 happened, which is how wishful verdicts are born.
 
+Every claim in a finding or report carries an **evidence class**:
+`measured` (the command and its output are in the session logs), `derived`
+(reasoned from named source lines, cite them), or `carried` (copied from an
+earlier report, with that report's class). A negative claim — "rejects
+every credential", "cannot be built", "never expires" — is only ever
+`measured`: run it against the real inputs, including the empty password
+and the missing header, before it can appear as a finding. A `derived`
+number (a timeout, a lease, a budget) stays labelled derived until a
+campaign measures it. One campaign carried "PD REST rejects every
+credential" through three reports on source reading alone; five curls
+showed any password works for four fixed usernames, and two recommendations
+had been built on the false claim.
+
 (The `ktest` in the session-dir path and label is just this skill's session
 naming convention, kept short for label values.)
 
@@ -126,11 +139,15 @@ naming convention, kept short for label values.)
 Read the reference for a phase when you enter it, not before.
 
 1. **Static / manifest layer** — lint (default + `--strict` with
-   `values-cluster.yaml`), render all three presets, run the chart's
+   `values-cluster.yaml`), render all presets, run the chart's
    validateValues fail-paths (each MUST fail; a pass is a bug), kubeconform
    `-strict` at the target k8s version AND the chart's `kubeVersion` floor,
    pluto, kube-score/polaris on the CLUSTER render, helm-unittest, ct lint,
-   and a manual render review. → `references/test-suite.md` §Static.
+   and a manual render review. Iterate presets with explicit invocations,
+   never a shell variable holding several flags; a render of 0 objects or a
+   lint error naming a file with a leading space is a harness fault, re-run
+   before concluding anything about the chart. → `references/test-suite.md`
+   §Static.
 2. **Install + smoke** — 3+3+3+Hubble, auth on, images pre-loaded with
    `kind load`. The install oracle is not "Ready": grep every PD's logs for
    `Could not resolve allowlist entry` and `Blocked connection` — zero of
@@ -139,8 +156,10 @@ Read the reference for a phase when you enter it, not before.
 3. **Distributed fault scenarios** — follower/leader crash, majority loss
    (negative tests), store durability, network partition, pod-IP churn
    (mandatory — it exercises the known allowlist bug), PVC reattach, rolling
-   restart under load, auth on every replica. Each with fault command,
-   landing evidence, oracle, timing budget. → `references/test-suite.md`
+   restart under load, auth on every replica, and the Server discovery lease
+   (three registry rows, Hubble shows three, a replaced Pod's row expires
+   within the lease). Each with fault command, landing evidence, oracle,
+   timing budget. → `references/test-suite.md`
    §Scenarios, and `references/ipauth-bug-family.md` for what the allowlist
    bug looks like when you hit it.
 4. **Upgrade path + rotation** — install the previous chart version with
@@ -176,9 +195,19 @@ and `references/chart-engineering.md`):
   peer-DNS gate deadlock-free, and it is load-bearing: verify it exists
   before trusting any bootstrap reasoning.
 - Two similarly named gates, different jobs: the Store's `wait-for-pd` init
-  waits for PD **quorum health** over `/v1/health` (minutes-scale, 900s
-  budget); the PD's `wait-for-pd-dns` init waits only for peer **DNS
-  publication** (seconds-scale, 300s budget). Don't conflate them.
+  waits until a **majority of PD peers answer `store.waitPath`** (default
+  `/v1/health`; minutes-scale, 900s budget); the PD's `wait-for-pd-dns` init
+  waits only for peer **DNS publication** (seconds-scale, 300s budget).
+  Don't conflate them, and don't call the first one a quorum wait:
+  `/v1/health` answers 200 as soon as PD's listener is up and never consults
+  raft, so the count is of listeners. PD images from 1.8.0 add `/v1/ready`
+  (503 without a raft leader); on those, `pd.readinessPath` and
+  `store.waitPath` set to `/v1/ready` make readiness and the gate mean quorum.
+- Server discovery is a lease: each Server re-registers its announced URL
+  with PD every 15s and PD drops the entry after three missed heartbeats
+  (45s; measured 30 to 35s). The registry key is app name / version /
+  address, so per-Pod-IP announcement yields one row per replica and a
+  shared Service URL collapses all replicas into one row.
 - Timing budgets that separate real failures from false INCONCLUSIVEs:
   PD startup ≤300s, Store startup ≤400s (+ wait-for-pd init ≤900s), Server
   startup floor 450s, PD store-offline patrol 60s cadence, PD quorum
@@ -197,8 +226,15 @@ and `references/chart-engineering.md`):
   pod-uid captures polluted by terminating pods, and more).
 - Report what happened, not what should have happened: never write a result
   row for a test that did not run; verify every claimed row against session
-  logs before publishing. Blame environment honestly (resource contention
-  and network drops mimic chart bugs).
+  logs before publishing, and confirm every claim row carries its evidence
+  class. Blame environment honestly (resource contention and network drops
+  mimic chart bugs).
+- An oracle endpoint is named from the handler that serves it, not from the
+  shape of its URL: before a claim block is written, read the REST class
+  (path prefix, auth exclusion list, response shape) and cite it. The PD
+  endpoint table in `references/test-suite.md` §Endpoints was built that
+  way; extend it the same way. One report told readers to count Server
+  registrations via `/v1/members`, which lists PD raft members.
 - Image-side bugs get documented in the chart's README Limitations, never
   silently worked around in templates.
 - A worked case study of this entire skill applied end-to-end, with real
