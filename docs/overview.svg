@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 700" width="1300" height="700" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <rect x="0" y="0" width="1300" height="700" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1f2933"/></marker>
+  </defs>
+  <text x="30" y="46" font-size="26" font-weight="700" fill="#1f2933">hugegraph-helm-testing: how a campaign runs</text>
+  <text x="30" y="72" font-size="17" fill="#52606d">Six phases in order, one state file underneath, and three rules that every result has to satisfy before it is written down.</text>
+
+  <!-- phase boxes -->
+  <g font-size="15" fill="#1f2933">
+    <rect x="30" y="105" width="190" height="150" rx="10" fill="#e3f4f1" stroke="#0e7a6f" stroke-width="2"/>
+    <text x="125" y="132" text-anchor="middle" font-size="18" font-weight="700">1. Static gates</text>
+    <text x="45" y="160">lint on 3 presets</text>
+    <text x="45" y="182">render counts</text>
+    <text x="45" y="204">fail-paths must fail</text>
+    <text x="45" y="226">kubeconform, unit tests</text>
+
+    <rect x="240" y="105" width="190" height="150" rx="10" fill="#e3f4f1" stroke="#0e7a6f" stroke-width="2"/>
+    <text x="335" y="132" text-anchor="middle" font-size="18" font-weight="700">2. Install + smoke</text>
+    <text x="255" y="160">3 PD, 3 Store, 3 Server</text>
+    <text x="255" y="182">auth on, images pinned</text>
+    <text x="255" y="204">oracle: 0 blocked lines</text>
+    <text x="255" y="226">on every PD, one leader</text>
+
+    <rect x="450" y="105" width="190" height="150" rx="10" fill="#e3f4f1" stroke="#0e7a6f" stroke-width="2"/>
+    <text x="545" y="132" text-anchor="middle" font-size="18" font-weight="700">3. Fault scenarios</text>
+    <text x="465" y="160">crash, majority loss,</text>
+    <text x="465" y="182">partition, pod-IP churn,</text>
+    <text x="465" y="204">rolling restart, lease</text>
+    <text x="465" y="226">oracle written first</text>
+
+    <rect x="660" y="105" width="190" height="150" rx="10" fill="#e3f4f1" stroke="#0e7a6f" stroke-width="2"/>
+    <text x="755" y="132" text-anchor="middle" font-size="18" font-weight="700">4. Upgrade + rotation</text>
+    <text x="675" y="160">old chart, marker data,</text>
+    <text x="675" y="182">upgrade: uid diff per</text>
+    <text x="675" y="204">component; image swap</text>
+    <text x="675" y="226">variant for image fixes</text>
+
+    <rect x="870" y="105" width="190" height="150" rx="10" fill="#e3f4f1" stroke="#0e7a6f" stroke-width="2"/>
+    <text x="965" y="132" text-anchor="middle" font-size="18" font-weight="700">5. User journey</text>
+    <text x="885" y="160">README followed</text>
+    <text x="885" y="182">literally, zero overrides</text>
+    <text x="885" y="204">a doc command that</text>
+    <text x="885" y="226">fails is a finding</text>
+
+    <rect x="1080" y="105" width="190" height="150" rx="10" fill="#fbeedc" stroke="#b5720f" stroke-width="2"/>
+    <text x="1175" y="132" text-anchor="middle" font-size="18" font-weight="700">6. Fix loop</text>
+    <text x="1095" y="160">audit: chart or image?</text>
+    <text x="1095" y="182">one reviewable commit</text>
+    <text x="1095" y="204">three-lens review</text>
+    <text x="1095" y="226">re-test, ship on approval</text>
+  </g>
+  <g stroke="#1f2933" stroke-width="2" fill="none">
+    <line x1="220" y1="180" x2="238" y2="180" marker-end="url(#arrow)"/>
+    <line x1="430" y1="180" x2="448" y2="180" marker-end="url(#arrow)"/>
+    <line x1="640" y1="180" x2="658" y2="180" marker-end="url(#arrow)"/>
+    <line x1="850" y1="180" x2="868" y2="180" marker-end="url(#arrow)"/>
+    <line x1="1060" y1="180" x2="1078" y2="180" marker-end="url(#arrow)"/>
+  </g>
+  <text x="1175" y="275" text-anchor="middle" font-size="14" fill="#b5720f">only when a phase found a chart bug</text>
+
+  <!-- state file bar -->
+  <rect x="30" y="300" width="1240" height="62" rx="10" fill="#f1f3f5" stroke="#9aa5b1" stroke-width="1.5"/>
+  <text x="50" y="326" font-size="17" font-weight="700" fill="#1f2933">state.md, updated before every pause and read first on every resume</text>
+  <text x="50" y="349" font-size="15" fill="#52606d">intake answers (push allowed? which host? which branch?)  |  baseline: chart SHA, image digests and labels  |  phase checklist  |  decisions log  |  findings index  |  exactly one next action</text>
+
+  <!-- three rules -->
+  <g font-size="15" fill="#1f2933">
+    <rect x="30" y="392" width="400" height="230" rx="10" fill="#ffffff" stroke="#1f2933" stroke-width="1.5"/>
+    <text x="50" y="422" font-size="18" font-weight="700">Every claim has an evidence class</text>
+    <text x="50" y="454"><tspan font-weight="700" fill="#0e7a6f">measured</tspan>: the command and its output are in the logs</text>
+    <text x="50" y="480"><tspan font-weight="700" fill="#b5720f">derived</tspan>: reasoned from named source lines</text>
+    <text x="50" y="506"><tspan font-weight="700" fill="#52606d">carried</tspan>: copied from an earlier report, with its class</text>
+    <text x="50" y="545">A negative claim ("rejects every credential",</text>
+    <text x="50" y="567">"never expires") is only ever measured, with the</text>
+    <text x="50" y="589">real inputs, including the empty and missing ones.</text>
+
+    <rect x="450" y="392" width="400" height="230" rx="10" fill="#ffffff" stroke="#1f2933" stroke-width="1.5"/>
+    <text x="470" y="422" font-size="18" font-weight="700">Oracle first, landing evidence always</text>
+    <text x="470" y="454">Write the oracle and the verdict rules down</text>
+    <text x="470" y="476">before the fault is injected.</text>
+    <text x="470" y="508">Prove the fault landed: restart count, new uid</text>
+    <text x="470" y="530">and IP, packet counters, the target's own log.</text>
+    <text x="470" y="562">No landing evidence, no verdict beyond</text>
+    <text x="470" y="584"><tspan font-weight="700">INCONCLUSIVE</tspan>. Pods Ready is smoke, never a pass.</text>
+
+    <rect x="870" y="392" width="400" height="230" rx="10" fill="#ffffff" stroke="#1f2933" stroke-width="1.5"/>
+    <text x="890" y="422" font-size="18" font-weight="700">Verdicts name their blame</text>
+    <text x="890" y="454">PASS-static  PASS-smoke  PASS-hardening</text>
+    <text x="890" y="476">FAIL (-reproducible)  NOT-RUN</text>
+    <text x="890" y="498">INCONCLUSIVE (fault-not-proven, env, confounded)</text>
+    <text x="890" y="530">each with a blame class:</text>
+    <text x="890" y="552"><tspan font-weight="700">chart</tspan>  <tspan font-weight="700">image</tspan>  <tspan font-weight="700">harness</tspan>  <tspan font-weight="700">environment</tspan></text>
+    <text x="890" y="584">Image-side bugs go to README Limitations and</text>
+    <text x="890" y="606">an upstream issue, never into a template workaround.</text>
+  </g>
+  <text x="30" y="668" font-size="14" fill="#52606d">Report what happened, not what should have happened: a row with no findings file behind it did not run.</text>
+</svg>

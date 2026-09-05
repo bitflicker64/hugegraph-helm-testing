@@ -43,6 +43,17 @@ too clean or too broken.
   both `upgrade` and `uninstall`. Run installs detached and poll status.
 - **`--wait` timing out is a finding, not a retry loop**: capture pods, the
   stuck pod's describe + logs, THEN classify.
+- **The first `helm upgrade` after a fresh install rolls every workload that
+  carries a lookup-based checksum annotation.** At install the lookup sees no
+  Secret and the annotation is a constant; at the first upgrade it sees the
+  install-created Secret's resourceVersion and changes. On the current chart
+  that is Server (`checksum/auth`) and, with the PD REST secret wiring, PD and
+  Hubble too (`checksum/pd-auth`). A port-forward pinned to one of those pods
+  dies with "lost connection to pod" and the poller records empty rows, which
+  look like an empty registry. Before any upgrade-based scenario list the
+  checksum-bearing workloads, open port-forwards after the upgrade (or poll a
+  Service with a retry that re-resolves), and treat an all-empty poll as
+  INCONCLUSIVE-harness, never as "no rows".
 - **`lookup` + `randAlphaNum` Secrets make renders nondeterministic**: two
   consecutive `helm template` runs differ. Pin credentials in test values;
   never diff or snapshot rendered Secret data; expect template-only (GitOps)
@@ -104,6 +115,30 @@ too clean or too broken.
   landing evidence, not pod status.
 - **PD store-state oracles lag**: the offline patrol runs on a 60s cadence —
   polling `/v1/stores` sooner than ~70s after a store fault reads stale Up.
+- **A probe sampler must record how long the answer took, not only what it
+  was.** A `curl -m 2` sampler showed the whole leaderless window as `000`;
+  the same window with `curl -m 10 -w '%{time_total}'` showed one 503 that
+  took 9.79 s. Append `code/seconds` to every probe column, and either
+  timestamp each sub-call or read cheap gauges before the probe that may
+  stall: a gauge sampled after a stall reports the post-recovery state on
+  the same line as the stalled answer.
+- **Dry-run the harness's own parsers on live output before the fault.** An
+  invalid jsonpath (`... | keys[0]`) made a recovery loop's exit condition
+  never match and the script idled its full 600 s budget; a summary grep for
+  `hg_raft_has_leader=0` missed every label-bearing gauge line and reported
+  zero leaderless samples on a run that had them. Both passed `bash -n`.
+  Run every jsonpath, jq and grep against the live cluster and one real
+  sampler line and check for a value before injecting anything.
+- **A negative-path write oracle must be a request only the faulted component
+  can answer.** Reusing schema names across runs gave a fast 400 "has
+  existed" from the Server's own state inside a PD outage; it measured the
+  Server. Suffix every oracle object with the run (`d3q_$(date +%s)`) and
+  write down the expected failure mode (timeout or an explicit PD error).
+- **A metric value is not a finding until its registration has been read.**
+  `hg_raft_alive_peers` went 3.0 to NaN across a fault and was written up as
+  a gauge defect; the gauge is documented to return NaN on any non-leader,
+  and the sampled node had lost leadership. Sentinels (NaN, -1, 0) are
+  answers; read the `Gauge.builder` lambda and description first.
 - **A crippled PD passes `/v1/health`.** It answers 200 as soon as the
   listener is up; with two of three PDs deleted the survivor logged `Raft
   lost leader` within a second and still answered 200 on 26 of 26 samples.

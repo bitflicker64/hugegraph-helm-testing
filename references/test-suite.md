@@ -47,7 +47,10 @@ APIs. **kube-score / polaris** against the CLUSTER render (the default preset
 deliberately has empty resources; scoring it is noise). Expected standing
 findings: root-by-default containers, liveness==readiness endpoints on
 pd/store/server, no NetworkPolicy (explicitly unsupported), ephemeral-storage
-unset — report them, they gate restricted-PSS namespaces.
+unset — report them, they gate restricted-PSS namespaces. Do not propose
+ephemeral-storage defaults as a fix: the TiDB Operator and CockroachDB charts
+set none either (checked 2026-09-02), the `resources` blocks are passthroughs,
+and a limit would add an eviction mode nobody has measured.
 
 **helm-unittest**: current branches ship `tests/` (ten suites); run
 `helm unittest "$CHART"` and record the count. Older charts ship none; then
@@ -90,6 +93,40 @@ for n in $(kind get nodes --name "$CLUSTER"); do
   echo "$n: $(docker exec "$n" crictl images 2>/dev/null | grep -c hugegraph) hugegraph images"
 done
 ```
+
+### Building the images yourself
+
+When the tree under test has no published images (an unmerged fix, a testing
+branch), build them from that tree on the test host and stamp the revision in.
+The bake file in `docker/bake.hcl` defaults to two platforms, which needs
+emulation; override it to the host's platform:
+
+```bash
+SHA=$(git rev-parse HEAD)
+IMAGE_TAG=<tag> SOURCE_REVISION=$SHA docker buildx bake -f docker/bake.hcl pd store server-hstore \
+  --set '*.platform=linux/amd64' \
+  --set "*.labels.org.opencontainers.image.revision=$SHA" --progress=plain
+```
+
+About eight minutes for the three images on 24 cores. Use a tag that exists
+nowhere else (`hd-a`, `hd-b`, never the chart default), load with the
+`docker save --platform` + `kind load image-archive` pair above, and then
+**pin that tag in the session values** for every component: the chart default
+plus `IfNotPresent` would make each node pull the registry's copy of the
+default tag and the campaign would test a different build without a single
+error. Read the identity back from the running pod, through the node that
+runs it:
+
+```bash
+POD=$(kubectl -n "$NS" get pods -l app.kubernetes.io/component=pd -o jsonpath='{.items[0].metadata.name}')
+REF=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].image}')
+NODE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}')
+docker exec "$NODE" crictl inspecti --output json "$REF" \
+  | jq -r '.status.spec // .info.imageSpec | .config.Labels["org.opencontainers.image.revision"] // "NONE"'
+```
+
+Push a tag on the source repository for the built tree (`helm-dev-YYYYMMDD`
+worked) so PR comments and reports can cite an immutable ref.
 
 `kind load docker-image` **aborts entirely if any one image is missing
 locally**, so pull first and check every load's exit status; a failed load
@@ -154,15 +191,42 @@ packet counters — no evidence, no verdict beyond INCONCLUSIVE.
 |---|---|---|---|
 | Follower crash | `kubectl exec <pd> -c pd -- sh -c 'kill -9 $(pgrep -f "[j]ava"|head -1)'` | writes 201 during outage; rejoin Ready | ≤300s rejoin. `kill -9 1` is INERT — PID 1 is dumb-init and the kernel drops the signal; kill the java child. |
 | Leader crash | same, on the pod whose log says `becomes leader` | new leader elected; pre-fault write durable; write path ≤120s | election is seconds; clients reconnect lazily |
-| PD majority loss (negative) | `kubectl delete pod` TWO PDs (delete holds the window; in-place JVM restart recovers too fast) | PD-dependent ops (schema create) FAIL during window — failures are the pass; full recovery ≤600s | 7/8 failures observed = correct quorum protection |
+| PD majority loss (negative) | `kubectl delete pod` TWO PDs (delete holds the window; in-place JVM restart recovers too fast) | PD-dependent ops (schema create) FAIL during window — failures are the pass; full recovery ≤600s. With `pd.readinessPath` and `store.waitPath` on `/v1/ready`: the survivor answers 503 with `hg_raft_has_leader 0`, `/v1/health` stays 200, and a Store deleted inside the window holds in its init container until two PDs answer | 7/8 failures observed = correct quorum protection. Name every write oracle per run (`d3q_$(date +%s)`): a reused name gets a fast 400 "has existed" from the Server's own state and says nothing about PD. Sample `/v1/ready` with `curl -m 10 -w '%{time_total}'`: on 1.8.0 images the handler stalled 9.8 s during the election before its 503, and a 2 s timeout showed only blanks. The window is 12 to 20 s, under the 30 s readiness failure budget, so the PD Pod itself stays Ready |
 | Store crash + durability | kill java in one store | writes/reads continue (2/3 shards); pre- and mid-fault writes readable after rejoin | store Up-mark lags the 60s patrol |
 | Store majority loss | kill java in two stores | honest answer: in-place restart is faster than the window — expect INCONCLUSIVE unless you block rescheduling | don't fake this one |
-| Partition of leader | `docker exec <kind-node> iptables -I FORWARD 1 -s/-d <podIP> -j DROP` (Kind nodes are containers; on other distros get a node shell via `kubectl debug node/<n>` and apply the same rules); landing = packet counters | survivors keep serving; converge ≤120s after heal; no split-brain | kubelet probes bypass FORWARD → pod stays Ready, NotReady is NOT evidence. Run EARLY — after churn scenarios the allowlists are poisoned and results are confounded. |
+| Partition of leader | Preferred: Chaos Mesh `NetworkChaos` (action partition, `target` selector scoped to the peer PDs), which acts inside the pod's network namespace and reports landing in `status.experiment.containerRecords[].injectedCount` / `recoveredCount`. Fallback: `docker exec <kind-node> iptables -I FORWARD 1 -s/-d <podIP> -j DROP` (Kind nodes are containers; on other distros get a node shell via `kubectl debug node/<n>`); landing = packet counters | survivors keep serving; converge ≤120s after heal; no split-brain | Node-level filtering sits a layer above the pod, so the pod's own probes (which originate on the node) never see the cut: pod stays Ready, NotReady is NOT evidence. Chaos Mesh injects only and supplies no oracle. Run EARLY — after churn scenarios the allowlists are poisoned and results are confounded. |
 | **Pod-IP churn (mandatory)** | `kubectl delete pod <pd>`; landing = same hostname, NEW podIP, new uid | peers must accept the new IP. Expect blocking on images WITHOUT the allowlist refresh — the verdict comes from the captured `Blocked connection from <new-ip>` lines, never pre-declared. If peers accept the new IP, the image has the refresh: record PASS and note the image version. | if the IP didn't change, the fault didn't land — retry |
 | PVC reattach | graceful delete a store pod | `.spec.volumeName` unchanged; pre-fault data readable | local-path PVs are node-pinned on Kind |
 | Rolling restart under load | `kubectl rollout restart` store→pd→server with a write sampler | zero LOST acked writes; bounded error window; PD roll causes a block window (bug family Face 2) | run the sampler in the SAME foreground session (see pitfalls) |
 | Auth matrix | none | on EVERY Server pod IP: protected read/write = 401 no-cred, 401 wrong-cred, 200/201 admin | `/versions` is PUBLIC — useless as an auth oracle |
 | Server discovery lease | `kubectl delete pod <server>` with a 5s poller on PD `/v1/allInfo` running | three `data.other` rows = three Server Pod IPs before; new IP within one heartbeat; old IP gone within 45s; never more than replicas+1 rows; Hubble `operations/nodes` lists three SERVER | measured 30 to 35s expiry, 5s new registration; see §Discovery lease |
+
+### Claim taxonomy: generating scenarios beyond the table
+
+The table above is the default battery, not the boundary of coverage. Each row
+is an instance of the same eight-field claim block (claim, budget tier, fault,
+landing evidence, oracle, negative control, ambiguity, blame rule); the block is
+reusable, so new claims are generated, not invented. Enumerate the space:
+
+- **Invariant**: availability (writes keep landing), durability (acked data
+  survives), consistency (every replica returns the same answer), isolation
+  (data stays in its own graph and graphspace), blast radius (one component's
+  fault stays in that component), identity (schema and ID namespaces never
+  collide), attribution (the image and chart under test are the ones you
+  think).
+- **Fault**: process crash, pod replacement (new IP and uid), majority loss,
+  partition, disk or PVC reattach, clock skew, rolling restart, upgrade,
+  secret rotation, slow start.
+- **Topology and boundary**: single node vs. one-per-node, replicas 1/3/5,
+  two releases in one cluster, two namespaces on one node, first boot vs.
+  steady state, first upgrade after install.
+
+For each run, pick at most three new cells the battery does not cover (more
+than that and the evidence quality drops), write them into the eight-field
+block before the fault, and report coverage as cells exercised over cells
+enumerated, not as rows passed. Data-correctness claims need data-shaped
+oracles: a written expectation of each graph's contents and a differ, so
+"my data survived" becomes "my data stayed only where it belongs".
 
 ### Discovery lease (four claims)
 
@@ -231,7 +295,7 @@ with the result in the body, so status codes carry no signal there.
 | `GET /v1/stores` | `-u hg:` | registered Stores and state counts; lags the 60s patrol | `StoreAPI` |
 | `GET /v1/allInfo` | `-u hg:` | everything registered: `data.PD`, `data.STORE`, `data.other` (Servers) | `RegistryAPI.getAllInfo` |
 | `POST /v1/registryInfo` | `-u hg:` | registry query by `appName` / labels / version, JSON body | `RegistryAPI.getInfo` |
-| `/actuator/prometheus` | none | `hg_up`, `hg_stores`, `hg_terms`, `hg_graphs`; from 1.8.0 also `hg_raft_leader`, `hg_raft_has_leader`, `hg_raft_alive_peers` | `PDMetrics` |
+| `/actuator/prometheus` | none | `hg_up`, `hg_stores`, `hg_terms`, `hg_graphs`; from 1.8.0 also `hg_raft_leader`, `hg_raft_has_leader`, `hg_raft_alive_peers`. `alive_peers` is NaN on every non-leader by design (the registration returns NaN when `getAlivePeerCount` is -1), so a node that lost leadership reads NaN, not a defect. Labels are emitted as `hg_raft_has_leader{hg="pd",} 1.0`; strip them (`sed -E 's/\{[^}]*\}//'`) before counting | `PDMetrics` |
 
 Server registrations are **not** in `/v1/members`; that endpoint lists PD's
 own raft group. The registry key is app name / version / address
@@ -239,6 +303,23 @@ own raft group. The registry key is app name / version / address
 whether replicas collapse into one row.
 
 ## Upgrade path + rotation
+
+### Image-swap variant (two-stage campaign)
+
+To measure an image-side fix, build two image sets from adjacent tree states
+(without and with the fix), install on the first, run the battery, then
+`helm upgrade` changing only the image tags. One cluster then yields the
+negative control (the old behaviour reproduced on stage A), the fix (the
+behaviour flipped on stage B) and an image-roll upgrade path. Oracle for the
+roll: uid diff per component (exactly the components whose image changed),
+the revision label read from every pod afterwards, a marker written on stage
+A readable on stage B, and the stage A control matrix repeated on stage B.
+Workloads carrying a lookup-based checksum annotation also roll on the
+**first** upgrade after a fresh install (the lookup first sees the
+install-created Secret then), so do not make stage B the first upgrade if
+the roll set is part of the oracle, and expect any port-forward to those pods
+to die during it.
+
 
 1. Install the PREVIOUS chart version, write marker data. Pick the baseline
    as the most recent ref where `Chart.yaml`'s version differs from the

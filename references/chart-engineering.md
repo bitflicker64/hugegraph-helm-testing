@@ -63,6 +63,21 @@ annotations are best-effort by construction):
   `helm upgrade` — annotation changes, workload rolls. Prove it live
   (annotation value + uid diff) before claiming it.
 
+### Extending a lookup checksum to more workloads
+
+The annotation's value comes from a `lookup`, so it changes on the first
+`helm upgrade` after a fresh install, when the install-created Secret first
+becomes visible to the template. Every workload that carries such an
+annotation rolls once at that moment. Extending the pattern to PD (as the PD
+REST secret wiring does with `checksum/pd-auth`) therefore extends that
+first-upgrade roll to a raft group, one pod at a time. Keep it anyway:
+dropping `resourceVersion` from the hash would stop PD restarting on Secret
+rotation while Server and Hubble do, and the three copies of the secret
+would drift apart with every management call answering 401. Document the
+roll in the README Upgrading section, offer
+`pd.updateStrategy.type=OnDelete` for controlled windows, and make the test
+campaign's first upgrade a throwaway (see the testing pitfalls).
+
 ## Explicit StatefulSet lifecycle fields
 
 `updateStrategy` (default `type: RollingUpdate`) and

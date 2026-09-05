@@ -21,9 +21,22 @@ description: >-
 
 # HugeGraph Helm chart testing
 
-A community skill for testing the HugeGraph Helm chart the way it fails in
-real life, and for landing chart fixes that survive review. It was distilled
-from a full real-world cycle: a test campaign that caught an
+**Created by Himanshu Verma / https://github.com/bitflicker64**
+
+An open-source skill for testing the HugeGraph Helm chart the way it fails in
+real life, and for landing chart fixes that survive review. Distilled from six
+test campaigns against the chart in apache/hugegraph#3132 between August and
+September 2026.
+
+**Licence:** Apache License 2.0, the same as HugeGraph; share and adapt with
+attribution (see LICENSE).
+
+**Feedback & Support:** if the method is wrong or missing a case, open an
+issue at https://github.com/bitflicker64/hugegraph-helm-testing so every
+user benefits. If the agent did not follow a rule written here, acknowledge
+and correct rather than filing.
+
+It was distilled from a full real-world cycle: a test campaign that caught an
 install-bricking PD allowlist race, the chart fix for it (`wait-for-pd-dns`),
 three independent reviews, and a live upgrade-path re-test. The rules below
 each earned their place by catching a real bug — or by being the mistake that
@@ -41,6 +54,10 @@ hid one.
   hosts.
 - Component images. Test against pinned digests and record them in every
   report — mutable tags (`helm-dev`, `latest`) make results unreproducible.
+  When the branch under test has no published images, build them yourself
+  from its tree with the revision label stamped in (recipe in
+  `references/test-suite.md` §Install, "Building the images yourself") and
+  tag the source tree so a report or PR comment can cite it.
 
 ## Intake — ask before touching anything
 
@@ -159,14 +176,20 @@ Read the reference for a phase when you enter it, not before.
    restart under load, auth on every replica, and the Server discovery lease
    (three registry rows, Hubble shows three, a replaced Pod's row expires
    within the lease). Each with fault command, landing evidence, oracle,
-   timing budget. → `references/test-suite.md`
+   timing budget. The table is a starting set, not the definition of
+   coverage: generate further claims from the taxonomy in
+   `references/test-suite.md` §Claim taxonomy and report coverage against
+   the taxonomy, not against the list. → `references/test-suite.md`
    §Scenarios, and `references/ipauth-bug-family.md` for what the allowlist
    bug looks like when you hit it.
 4. **Upgrade path + rotation** — install the previous chart version with
    marker data, upgrade, and judge by **pod-uid diff per component** (who
    rolled, who must not have), marker durability, and block-window behavior;
    then validate the documented remediation actually converges. Rotate an
-   `existingSecret` and prove the checksum annotation rolls Server.
+   `existingSecret` and prove the checksum annotation rolls Server. When the
+   question is an image-side fix, run the two-stage variant: install on
+   images without the fix, `helm upgrade` to images with it, and take the
+   negative control, the fix and the image-roll path from one cluster.
    → `references/test-suite.md` §Upgrade.
 5. **User journey** — follow the README/NOTES.txt literally as a new user
    (zero-override install, port-forwards, first CRUD, upgrade, rollback,
@@ -234,7 +257,20 @@ and `references/chart-engineering.md`):
   (path prefix, auth exclusion list, response shape) and cite it. The PD
   endpoint table in `references/test-suite.md` §Endpoints was built that
   way; extend it the same way. One report told readers to count Server
-  registrations via `/v1/members`, which lists PD raft members.
+  registrations via `/v1/members`, which lists PD raft members. The same
+  rule covers metrics: a gauge is interpreted from its registration (the
+  lambda and description that emit it), not from its value. NaN, -1 and 0
+  are usually documented sentinels; `hg_raft_alive_peers` is NaN on every
+  non-leader by design, and one campaign nearly reported that as a defect.
+- Pin in the session values exactly the image tags (or digests) you loaded
+  onto the nodes. The chart default plus `IfNotPresent` pulls whatever the
+  registry holds under that tag on every node that lacks it, and the run
+  silently tests a different build. Read the identity back from the running
+  pod, never from the build host.
+- Before injecting a fault, run every jsonpath, jq and grep the scenario
+  script relies on against the live cluster and against one real sampler
+  line, and check they return a value. A parser that cannot match returns
+  emptiness, and emptiness reads like a quiet cluster.
 - Image-side bugs get documented in the chart's README Limitations, never
   silently worked around in templates.
 - A worked case study of this entire skill applied end-to-end, with real
